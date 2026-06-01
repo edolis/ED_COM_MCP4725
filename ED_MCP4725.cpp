@@ -34,7 +34,6 @@ MCP4725* MCP4725::create(I2CBus& bus, uint8_t address, float maxVoltage, bool se
 
 MCP4725::MCP4725(I2CBus& bus, uint8_t address, float maxVoltage)
     : _bus(bus),
-      _devHandle(nullptr),
       _address(address),
       _lastValue(0),
       _powerDownMode(0),
@@ -44,17 +43,10 @@ MCP4725::MCP4725(I2CBus& bus, uint8_t address, float maxVoltage)
 }
 
 MCP4725::~MCP4725() {
-    // Device handle is managed by I2CBus – nothing to do here
+    // Nothing to clean up – bus handles are managed by I2CBus
 }
 
 esp_err_t MCP4725::begin(bool sendReset) {
-    // Obtain device handle from the bus
-    esp_err_t err = _bus.get_device(_address, &_devHandle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get device handle for 0x%02X", _address);
-        return err;
-    }
-
     // Verify device presence
     if (!isConnected()) {
         ESP_LOGW(TAG, "Device at 0x%02X not responding", _address);
@@ -62,7 +54,6 @@ esp_err_t MCP4725::begin(bool sendReset) {
     }
 
     // Optional: send general call reset to ensure EEPROM is loaded
-    // This is recommended when VDD ramp rate is slow (<1V/ms) – datasheet §5.4.2
     if (sendReset) {
         powerOnReset();
         vTaskDelay(pdMS_TO_TICKS(10));   // small delay for reset to settle
@@ -79,10 +70,9 @@ esp_err_t MCP4725::begin(bool sendReset) {
 // Basic operations
 // ----------------------------------------------------------------------
 bool MCP4725::isConnected() {
-    if (!_devHandle) return false;
-    // Quick probe: try to read 1 byte (device should ACK)
+    // Probe the device: try to read 1 byte (device should ACK)
     uint8_t dummy;
-    esp_err_t err = i2c_master_receive(_devHandle, &dummy, 1, I2C_TRANSFER_TIMEOUT_MS);
+    esp_err_t err = _bus.read(_address, &dummy, 1);
     return (err == ESP_OK);
 }
 
@@ -105,16 +95,14 @@ float MCP4725::getPercentage() const {
     return (_lastValue * 100.0f) / MCP4725_MAXVALUE;
 }
 
-// Voltage: using datasheet formula Vout = Vref * code / 4096
 esp_err_t MCP4725::setVoltage(float v) {
     if (v < 0.0f || v > _maxVoltage) return MCP4725_VALUE_ERROR;
     uint16_t value = (uint16_t)((v * 4096.0f) / _maxVoltage + 0.5f);
-    if (value > 4095) value = 4095;   // clamp to max valid code
+    if (value > 4095) value = 4095;
     return setValue(value);
 }
 
 float MCP4725::getVoltage() const {
-    // datasheet Eq 5-1: Vout = Vref * code / 4096
     return (_lastValue * _maxVoltage) / 4096.0f;
 }
 
@@ -152,7 +140,7 @@ bool MCP4725::ready() {
 }
 
 uint16_t MCP4725::readDAC() {
-    // Wait for any pending EEPROM write (datasheet: EEPROM write blocks DAC register read)
+    // Wait for any pending EEPROM write
     uint32_t deadline = esp_timer_get_time() / 1000 + EEPROM_WRITE_TIMEOUT_MS;
     while (!ready()) {
         if ((esp_timer_get_time() / 1000) > deadline) break;
@@ -196,10 +184,9 @@ uint8_t MCP4725::readPowerDownModeEEPROM() {
 }
 
 uint8_t MCP4725::readPowerDownModeDAC() {
-    // No need to wait for EEPROM – reading DAC register is independent
     uint8_t buf[1];
     if (_readRegister(buf, 1) != ESP_OK) return 0;
-    // PD bits are in bits 5-4 of first status byte (Figure 6-3)
+    // PD bits are in bits 5-4 of first status byte (Table 5-4)
     return (buf[0] >> 4) & 0x03;
 }
 
@@ -223,35 +210,32 @@ esp_err_t MCP4725::powerOnWakeUp() {
 }
 
 // ----------------------------------------------------------------------
-// Low‑level I2C helpers
+// Low‑level I2C helpers (using _bus public methods)
 // ----------------------------------------------------------------------
 esp_err_t MCP4725::_writeFastMode(uint16_t value) {
     uint8_t data[2];
     data[0] = ((value >> 8) & 0x0F) | (_powerDownMode << 4);
     data[1] = value & 0xFF;
-    return i2c_master_transmit(_devHandle, data, sizeof(data), I2C_TRANSFER_TIMEOUT_MS);
+    return _bus.write(_address, data, sizeof(data));
 }
 
 esp_err_t MCP4725::_writeRegisterMode(uint16_t value, uint8_t reg) {
+    // Combine PD bits according to datasheet Figure 6-2
+    reg |= (_powerDownMode);   // PD bits go into bits 1,0
     uint8_t data[3];
-    reg |= (_powerDownMode << 1);   // PD bits in reg bits 2-1? Check datasheet: for write register mode, the PD bits are placed in the command byte at positions indicated.
-    // According to Figure 6-2: command byte = C2 C1 C0 X X PD1 PD0   (bits 6..0). So we shift PD by 1? Actually in _writeFastMode we shift by 4. For register mode, the datasheet shows that the 2nd byte (command) uses PD1,PD0 in bits 1 and 0 after the C2,C1,C0? Let's be careful.
-    // In Figure 6-2: the second byte = C2 C1 C0 X X PD1 PD0, where X are unused. So PD bits are in bits 1,0. So shifting by 0? Actually they are in the two LSBs. So we should do: reg |= (_powerDownMode). But reg already contains MCP4725_DAC or MCP4725_DACEEPROM (0x40 or 0x60). Those values have bits 6 and 5 set. To combine with PD bits in bits 1,0 we just OR.
-    // The previous code used `_powerDownMode << 1` – that would put PD bits at positions 2 and 1, which is wrong. Let's fix:
-    reg |= (_powerDownMode);      // PD bits go into bits 1,0 (datasheet Figure 6-2)
     data[0] = reg;
     data[1] = value >> 4;
     data[2] = (value & 0x0F) << 4;
-    return i2c_master_transmit(_devHandle, data, sizeof(data), I2C_TRANSFER_TIMEOUT_MS);
+    return _bus.write(_address, data, sizeof(data));
 }
 
 esp_err_t MCP4725::_readRegister(uint8_t* buffer, uint8_t length) {
     // MCP4725: read without sending a register address – just receive.
-    return i2c_master_receive(_devHandle, buffer, length, I2C_TRANSFER_TIMEOUT_MS);
+    return _bus.read(_address, buffer, length);
 }
 
 esp_err_t MCP4725::_generalCall(uint8_t gc) {
-    // General call uses address 0x00. Use the bus's write method.
+    // General call uses address 0x00
     return _bus.write(0x00, &gc, 1);
 }
 

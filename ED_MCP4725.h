@@ -1,6 +1,5 @@
 #pragma once
 
-#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "ED_i2c.h"
 #include <cstdint>
@@ -63,7 +62,7 @@ public:
 
     esp_err_t writePowerDownMode(uint8_t mode, bool eeprom = false);
     uint8_t   readPowerDownModeEEPROM();
-    uint8_t   readPowerDownModeDAC();             // FIXED: extracts bits 5-4 (not 1-0)
+    uint8_t   readPowerDownModeDAC();
 
     /**
      * @brief Read the Power‑On‑Reset flag.
@@ -82,14 +81,13 @@ private:
     MCP4725(I2CBus& bus, uint8_t address, float maxVoltage);
     esp_err_t begin(bool sendReset);
 
-    // Low‑level I2C helpers
+    // Low‑level I2C helpers (now use _bus directly)
     esp_err_t _writeFastMode(uint16_t value);
     esp_err_t _writeRegisterMode(uint16_t value, uint8_t reg);
     esp_err_t _readRegister(uint8_t* buffer, uint8_t length);
     esp_err_t _generalCall(uint8_t gc);
 
     I2CBus& _bus;
-    i2c_master_dev_handle_t _devHandle;
     uint8_t  _address;
     uint16_t _lastValue;
     uint8_t  _powerDownMode;
@@ -97,7 +95,7 @@ private:
     float    _maxVoltage;
 
     static constexpr uint32_t EEPROM_WRITE_TIMEOUT_MS = 100;
-    static constexpr uint32_t I2C_TRANSFER_TIMEOUT_MS = 100;
+    static constexpr uint32_t I2C_TRANSFER_TIMEOUT_MS = 100;  // kept for reference, not used directly
 };
 
 } // namespace ED_MCP4725

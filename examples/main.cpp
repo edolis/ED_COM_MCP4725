@@ -19,6 +19,9 @@
 #include "esp_timer.h"
 #include "ED_i2c.h"
 #include "ED_MCP4725.h"
+
+#define BOARD_VARIANT_ESP32C6_ZERO
+
 #include "ed_board.h"          // provides ED_I2C_SDA, ED_I2C_SCL
 
 #define I2C_MASTER_FREQ_HZ      400000
